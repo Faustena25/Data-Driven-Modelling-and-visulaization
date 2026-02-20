@@ -1,0 +1,246 @@
+# ── 0. Imports ────────────────────────────────────────────
+import warnings
+warnings.filterwarnings("ignore")
+
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.compose import ColumnTransformer
+from sklearn.metrics import (
+    accuracy_score, classification_report, confusion_matrix,
+    roc_auc_score, roc_curve, ConfusionMatrixDisplay
+)
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
+
+# ── 1. Load & Inspect ─────────────────────────────────────
+print("  AMAZON PRODUCT POPULARITY  –  ML PIPELINE")
+
+df = pd.read_excel("/content/amazondmm1.xlsx")
+
+print(f"\n Dataset shape : {df.shape}")
+print(f"   Columns       : {df.columns.tolist()}\n")
+
+# ── 2. Create Target Label ────────────────────────────────
+RATING_THRESHOLD = 5_000
+df["Popular"] = (df["Number of Ratings"] >= RATING_THRESHOLD).astype(int)
+
+print("  Label distribution (before dropping NaN):")
+vc = df["Popular"].value_counts()
+for label, count in vc.items():
+    pct = count / len(df) * 100
+    name = "Popular (1)" if label == 1 else "Not Popular (0)"
+    print(f"   {name} : {count:>4}  ({pct:.1f}%)")
+
+# ── 3. Feature Engineering ───────────────────────────────
+# Features available without cheating (exclude Number of Ratings)
+df["Price_to_Original_Ratio"] = df["Price (INR)"] / df["Original Price (INR)"].replace(0, np.nan)
+df["Savings_INR"]             = df["Original Price (INR)"] - df["Price (INR)"]
+
+FEATURES = [
+    "Price (INR)",
+    "Original Price (INR)",
+    "Discount Percentage",
+    "Rating (Max 5)",
+    "Price_to_Original_Ratio",
+    "Savings_INR",
+]
+
+TARGET = "Popular"
+
+# Drop rows where target itself is NaN
+df_model = df[FEATURES + [TARGET]].dropna(subset=[TARGET])
+
+print(f"\n Features used  : {FEATURES}")
+print(f"   Rows after NaN-target drop : {len(df_model)}")
+
+X = df_model[FEATURES]
+y = df_model[TARGET]
+
+# ── 4. Train / Test Split ────────────────────────────────
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y
+)
+
+print(f"\n  Train size : {len(X_train)}  |  Test size : {len(X_test)}")
+
+# ── 5. Preprocessing Pipeline ────────────────────────────
+numeric_transformer = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler",  StandardScaler()),
+])
+
+preprocessor = ColumnTransformer(
+    transformers=[("num", numeric_transformer, FEATURES)],
+    remainder="drop"
+)
+
+# ── 6. Define Models ─────────────────────────────────────
+models = {
+    "Logistic Regression"  : LogisticRegression(max_iter=500, random_state=42),
+    "Decision Tree"        : DecisionTreeClassifier(max_depth=5, random_state=42),
+    "Random Forest"        : RandomForestClassifier(n_estimators=100, random_state=42),
+    "Gradient Boosting"    : GradientBoostingClassifier(n_estimators=100, random_state=42),
+    "K-Nearest Neighbours" : KNeighborsClassifier(n_neighbors=7),
+    "SVM"                  : SVC(probability=True, random_state=42),
+}
+
+# ── 7. Cross-Validation + Test Evaluation ────────────────
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+results = {}
+
+print("  MODEL EVALUATION")
+
+for name, clf in models.items():
+    pipe = Pipeline([("preprocessor", preprocessor), ("classifier", clf)])
+
+    cv_scores = cross_val_score(pipe, X_train, y_train,
+                                cv=cv, scoring="accuracy")
+    pipe.fit(X_train, y_train)
+
+    y_pred = pipe.predict(X_test)
+    y_prob = pipe.predict_proba(X_test)[:, 1]
+
+    test_acc = accuracy_score(y_test, y_pred)
+    auc      = roc_auc_score(y_test, y_prob)
+
+    results[name] = {
+        "pipeline"    : pipe,
+        "cv_mean"     : cv_scores.mean(),
+        "cv_std"      : cv_scores.std(),
+        "test_acc"    : test_acc,
+        "auc"         : auc,
+        "y_pred"      : y_pred,
+        "y_prob"      : y_prob,
+    }
+
+    print(f"\n {name}")
+    print(f"   CV Accuracy : {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
+    print(f"   Test Acc    : {test_acc:.3f}   |   ROC-AUC : {auc:.3f}")
+
+# ── 8. Pick Best Model ────────────────────────────────────
+best_name = max(results, key=lambda n: results[n]["auc"])
+best      = results[best_name]
+
+print(f"   BEST MODEL : {best_name}")
+
+print(f"\n   Test Accuracy : {best['test_acc']:.3f}")
+print(f"   ROC-AUC       : {best['auc']:.3f}\n")
+print(classification_report(y_test, best["y_pred"],
+                             target_names=["Not Popular (0)", "Popular (1)"]))
+
+# ── 9. Visualisations ─────────────────────────────────────
+fig, axes = plt.subplots(2, 3, figsize=(18, 11))
+fig.suptitle("Amazon Product Popularity – ML Results", fontsize=16, fontweight="bold", y=0.98)
+
+# ── 9a. Model Comparison (Test Accuracy) ──────────────────
+ax = axes[0, 0]
+names  = list(results.keys())
+short  = ["LR", "DT", "RF", "GB", "KNN", "SVM"]
+accs   = [results[n]["test_acc"] for n in names]
+aucs   = [results[n]["auc"]      for n in names]
+colors = ["#4C72B0" if n != best_name else "#DD8452" for n in names]
+
+bars = ax.bar(short, accs, color=colors, edgecolor="white", linewidth=0.8)
+ax.set_ylim(0, 1.1)
+ax.axhline(0.5, color="grey", linestyle="--", linewidth=0.8, label="Baseline (50%)")
+for bar, val in zip(bars, accs):
+    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+            f"{val:.2f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
+ax.set_title("Test Accuracy by Model", fontweight="bold")
+ax.set_ylabel("Accuracy")
+ax.legend(fontsize=8)
+ax.set_ylim(0.5, 1.05)
+
+# ── 9b. ROC-AUC Comparison ────────────────────────────────
+ax = axes[0, 1]
+bars2 = ax.bar(short, aucs, color=colors, edgecolor="white", linewidth=0.8)
+for bar, val in zip(bars2, aucs):
+    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+            f"{val:.2f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
+ax.axhline(0.5, color="grey", linestyle="--", linewidth=0.8, label="Random classifier")
+ax.set_title("ROC-AUC Score by Model", fontweight="bold")
+ax.set_ylabel("ROC-AUC")
+ax.legend(fontsize=8)
+ax.set_ylim(0.4, 1.05)
+
+# ── 9c. Confusion Matrix for Best Model ───────────────────
+ax = axes[0, 2]
+cm = confusion_matrix(y_test, best["y_pred"])
+disp = ConfusionMatrixDisplay(
+    confusion_matrix=cm,
+    display_labels=["Not Popular", "Popular"]
+)
+disp.plot(ax=ax, colorbar=False, cmap="Blues")
+ax.set_title(f"Confusion Matrix\n({best_name})", fontweight="bold")
+
+# ── 9d. ROC Curves for All Models ─────────────────────────
+ax = axes[1, 0]
+for name in names:
+    fpr, tpr, _ = roc_curve(y_test, results[name]["y_prob"])
+    lw = 2.5 if name == best_name else 1.2
+    ax.plot(fpr, tpr,
+            label=f"{name[:3]}… AUC={results[name]['auc']:.2f}",
+            linewidth=lw)
+ax.plot([0, 1], [0, 1], "k--", linewidth=0.8)
+ax.set_xlabel("False Positive Rate")
+ax.set_ylabel("True Positive Rate")
+ax.set_title("ROC Curves – All Models", fontweight="bold")
+ax.legend(fontsize=7, loc="lower right")
+
+# ── 9e. Feature Importance (Random Forest) ────────────────
+ax = axes[1, 1]
+rf_pipe  = results["Random Forest"]["pipeline"]
+rf_clf   = rf_pipe.named_steps["classifier"]
+feat_imp = pd.Series(rf_clf.feature_importances_, index=FEATURES).sort_values()
+
+feat_labels = [f.replace(" (INR)", "").replace("_", " ").replace(" (Max 5)", "") for f in feat_imp.index]
+bars3 = ax.barh(feat_labels, feat_imp.values, color="#4C72B0", edgecolor="white")
+ax.set_title("Feature Importance\n(Random Forest)", fontweight="bold")
+ax.set_xlabel("Importance")
+
+# ── 9f. Label Distribution ────────────────────────────────
+ax = axes[1, 2]
+label_counts = y.value_counts()
+wedge_colors = ["#dd8452", "#4c72b0"]
+wedges, texts, autotexts = ax.pie(
+    label_counts.values,
+    labels=["Not Popular (0)", "Popular (1)"],
+    autopct="%1.1f%%",
+    startangle=90,
+    colors=wedge_colors,
+    wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+)
+for at in autotexts:
+    at.set_fontsize(11)
+    at.set_fontweight("bold")
+ax.set_title("Label Distribution", fontweight="bold")
+
+plt.tight_layout()
+plt.show()
+
+# ── 10. CV Summary Table ──────────────────────────────────
+
+print("  CROSS-VALIDATION SUMMARY TABLE")
+
+summary = pd.DataFrame({
+    "Model"    : list(results.keys()),
+    "CV Acc"   : [f"{results[n]['cv_mean']:.3f} ± {results[n]['cv_std']:.3f}" for n in results],
+    "Test Acc" : [f"{results[n]['test_acc']:.3f}" for n in results],
+    "ROC-AUC"  : [f"{results[n]['auc']:.3f}" for n in results],
+}).set_index("Model")
+print(summary.to_string())
+
+print("\n Pipeline complete.")
